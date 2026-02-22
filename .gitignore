@@ -36,3 +36,18 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+# IDE
+.idea/
+*.iml
+
+# Audio assets (do not commit)
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+
+# Logs
+*.log
+*.class
