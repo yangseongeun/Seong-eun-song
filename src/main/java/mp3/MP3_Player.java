@@ -14,24 +14,51 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-public class MP3_Player extends JFrame implements ActionListener, MouseListener, KeyListener, Runnable {
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+
+/**
+ * Refactored version:
+ * - Removed Runnable + manual Thread control (stop/suspend/resume).
+ * - Uses ExecutorService + Future cancellation + stream close (cooperative cancellation).
+ * - UI updates are executed on Swing EDT.
+ * - "Pause" is implemented as safe Stop (restart from beginning on next Play).
+ */
+
+public class MP3_Player extends JFrame implements ActionListener, MouseListener, KeyListener {
     private static final int EXIT_CODE = 0;
-    private static Player player;
+
+    // ===== 기존 코드 =====
+//    private static Player player;
+//    private Thread musicThread;
+//    private FileInputStream fileInputStream;
+//    private boolean isPlaying = false; //재생 중인지 아닌지 판단하는 변수
+
+    // ===== 변경 코드 =====
+    private final ExecutorService playbackExec = newSingleThreadExecutor();
+    private Future<?> playbackJob;
+
+    private volatile Player currentPlayer;
+    private volatile FileInputStream currentStream;
+
+    private volatile boolean isPlaying = false; //재생 중인지 아닌지 판단하는 변수
+
+    private final AtomicBoolean stopRequested = new AtomicBoolean(false);
 
     //index: 플레이 리스트의 인덱스 번호를 결정하는 변수
     //mode: 반복 없음, 한곡 반복, 전체 반복을 결정하는 변수
     private int index, mode = 0;
-    private boolean isPlaying = false; //재생 중인지 아닌지 판단하는 변수
-    private Thread musicThread;
 
     private JMenuItem openMenuItem, exitMenuItem, infoMenuItem;
 
     private JLabel titleLabel, subTitleLabel, playListLabel; //제목, 부제목, 재생목록 레이블
     private JButton prevButton, playPauseButton, stopButton, nextButton, repeatButton; //5개의 버튼
 
-    private static ArrayList<File> fileList = new ArrayList<File>();
-    private static JList<String> playList; //playList
+    private ArrayList<File> fileList = new ArrayList<>();
+    private JList<String> playList; //playList
     private boolean doubleClicked = false;
 
     //5개의 버튼
@@ -41,9 +68,9 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
     private final ImageIcon stopIcon = new ImageIcon("src/images/stop.png"); //정지 버튼
     private final ImageIcon nextIcon = new ImageIcon("src/images/next.png"); //다음 버튼
 
-//    private static JList<String> jList;
     private File currentFile;
-    private FileInputStream fileInputStream;
+    
+    private volatile boolean playTriggeredByDoubleClick = false;
 
     public MP3_Player(String subject, int width, int height) {
         setTitle(subject);
@@ -54,6 +81,7 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
 
         initializeComponents();
         setupLayout();
+        
         setVisible(true);
     }
 
@@ -68,6 +96,7 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
         //메뉴바
         JMenuBar menuBar = new JMenuBar();
         menuBar.setBackground(new Color(236, 209, 116));
+        
         JMenu fileMenu = new JMenu("파일");
         fileMenu.setFont(Gullim);
 
@@ -171,125 +200,263 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
         add(scrollPane, BorderLayout.CENTER);
     }
 
-    @SuppressWarnings({"removal"})
+    // ===== 이벤트 핸들링 =====
+    
     @Override
     public void actionPerformed(ActionEvent e) {
         Object source = e.getSource(); // 객체 내용 받아오기
+
         if (source == openMenuItem) { // 메뉴 아이템 중에 열기 버튼을 눌렀을 때
             openFiles(); // 파일 열기
-        } else if (source == exitMenuItem) { // 메뉴 아이템 중에 종료 버튼을 눌렀을 때
-            if (confirmExit()) System.exit(EXIT_CODE);
-        } else if (source == infoMenuItem) { // 메뉴 아이템 중에 정보 버튼을 눌렀을 때
-            showInfoDialog();
-        } else if (source == prevButton) { // 이전 버튼이 눌렸을 때
-            try {
-                playPreviousTrack();
-            } catch (FileNotFoundException ex) {
-                throw new RuntimeException(ex);
-            }
-        } else if (source == playPauseButton) { //재생_일시정지 버튼이 눌렸을 때
-            try {
-                togglePlayPause();
-            } catch (FileNotFoundException ex) {
-                throw new RuntimeException(ex);
-            }
-        } else if(source == stopButton) { //정지 버튼이 눌렸을 때
-            stopMusic();
-        } else if(source == nextButton) { //다음 버튼이 눌렸을 때
-            if(!fileList.isEmpty()) { //리스트에 파일이 있을 때
-                if(musicThread.isAlive()) { //뮤직 스레드가 살아 있다면
-                    musicThread.stop();	//뮤직 스레드를 정지
-                    //스레드를 정지하는 이유: 노래가 중복 재생이 된다. 이전 스레드를 닫고, 새로운 스레드를 생성한다.
-                }
-                try {
-                    playNextTrack(); //다음 트랙 재생
-                } catch (FileNotFoundException ex) {
-                    throw new RuntimeException(ex);
-                }
-            }
-            else { //리스트에 파일이 없을 때
-                JOptionPane.showMessageDialog(null, "리스트에 파일이 존재하지 않습니다!",
-                        "오류", JOptionPane.ERROR_MESSAGE); //오류 메시지 띄우기
-            }
-
-        } else if (source == repeatButton) { //반복 버튼이 눌렸을 때
-            mode++;
-            if(mode >= 3) { //모드가 3이 되면
-                mode = 0; //모드 0으로 다시 돌리기
-            }
-            switch(mode) { //모드
-                case 0: //무반복 모드
-                    repeatButton.setText("반복 없음");
-                    break;
-                case 1: //한번 반복 모드
-                    repeatButton.setText("한곡 반복");
-                    break;
-                case 2: //전체 반복 모드
-                    repeatButton.setText("전체 반복");
-                    break;
-            }
+            return;
         }
+        
+        if (source == exitMenuItem) { // 메뉴 아이템 중에 종료 버튼을 눌렀을 때
+            if (confirmExit()) {
+                shutdownPlayback();
+                System.exit(EXIT_CODE);
+            }
+            return;
+        }
+
+        if (source == infoMenuItem) { // 메뉴 아이템 중에 정보 버튼을 눌렀을 때
+            showInfoDialog();
+            return;
+        }
+
+        if (source == prevButton) { // 이전 버튼이 눌렸을 때
+            playPreviousTrack();
+            return;
+        }
+
+        if (source == playPauseButton) { //재생_일시정지 버튼이 눌렸을 때
+            togglePlayPause();
+            return;
+        }
+
+        if(source == stopButton) { //정지 버튼이 눌렸을 때
+            stopMusic();
+            return;
+        }
+
+        if(source == nextButton) { //다음 버튼이 눌렸을 때
+            playNextTrackManually();
+            return;
+        }
+
+        if (source == repeatButton) { //반복 버튼이 눌렸을 때
+            cycleRepeatMode();
+        }
+    }
+
+    // ===== Playback Control (refactored) =====
+
+    // 재생-일시정지 버튼이 눌렸을 때 실행되는 메소드
+    private void togglePlayPause() {
+        if(!isPlaying) {//음악이 재생 중이 아닐 때
+            if(fileList.isEmpty()) { //리스트에 파일이 없을 때
+                showNoFileError();
+                return;
+            }
+            // 만약 아무것도 선택되지 않는다면 범위 내의 인덱스 유지
+            if (index < 0 || index >= fileList.size()) index = 0;
+
+            startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악을 재생
+            return;
+        }
+
+        // "Pause" -> safe stop (restart from beginning)
+        SwingUtilities.invokeLater(() -> {
+            titleLabel.setText("음악 일시 정지됨");
+            subTitleLabel.setText("재생 버튼을 누르면 처음부터 재생됩니다.");
+            playPauseButton.setIcon(playIcon);
+        });
+
+        stopMusicInternal();
+        isPlaying = false;
     }
 
     // 정지 버튼이 눌렸을 때 실행되는 메소드
-    @SuppressWarnings("removal")
     private void stopMusic() {
-        if(!fileList.isEmpty()) {
-            musicThread.stop(); //음악 스레드를 정지한다.
+        if (fileList.isEmpty()) { // 파일 리스트가 비었는지 확인하고 비었으면 파일 없음 오류 메시지 출력
+            showNoFileError();
+            return;
+        }
+
+        stopMusicInternal();
+
+        SwingUtilities.invokeLater(() -> {
             titleLabel.setText("Seong Eun Song"); //제목을 "Seong Eun Song"으로 변경
             subTitleLabel.setText("음악 정지");
-            if(playPauseButton.getIcon() == pauseIcon) { //재생_일시정지 버튼의 아이콘이 일시정지 아이콘이었다면
-                playPauseButton.setIcon(playIcon); //아이콘을 재생 아이콘으로 변경
+            playPauseButton.setIcon(playIcon); //아이콘을 재생 아이콘으로 변경
+        });
+
+        isPlaying = false; //파워 꺼짐
+    }
+
+    public void startMusic(File file) {
+        // ===== 기존 재생 중이면 정지 =====
+        stopMusicInternal();
+
+        currentFile = file;
+
+        SwingUtilities.invokeLater(() -> {
+            titleLabel.setText("현재 재생 중인 파일은 " + currentFile.getName() + " 입니다."); //재생 중의 음악의 제목을 표시
+            subTitleLabel.setText("음악 재생 중");
+            playPauseButton.setIcon(pauseIcon);
+        });
+
+        playbackJob = playbackExec.submit(() -> {
+            stopRequested.set(false);
+
+            try (FileInputStream fis = new FileInputStream(currentFile)) {
+                currentStream = fis;
+                currentPlayer = new Player(fis);
+                isPlaying = true;
+
+                // Blocking play (runs in background thread)
+                currentPlayer.play();
+
+                SwingUtilities.invokeLater(this::onTrackCompleted);
+            } catch (Exception ex) {
+                // ✅ 취소/정지/곡전환으로 인한 예외면 팝업 띄우지 않음
+                if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                        "재생 오류: " + ex.getMessage(),
+                        "오류", JOptionPane.ERROR_MESSAGE)
+                );
+            } finally {
+                isPlaying = false;
+                currentPlayer = null;
+                currentStream = null;
             }
-            isPlaying = false; //파워 꺼짐
+        });
+    }
+
+    private void onTrackCompleted() {
+        // If user triggered another track via double-click/manual next, this completion might be from old job.
+        // Since stopMusicInternal() cancels & closes stream, completion after that is unlikely, but we keep logic simple.
+
+        // mode based auto-next
+        if(fileList.isEmpty()) {
+            resetToIdle("Seong Eun Song", "재생할 파일이 없습니다.");
+            return;
         }
-        else {
-            JOptionPane.showMessageDialog(null, "리스트에 파일이 존재하지 않습니다!",
-                    "오류", JOptionPane.ERROR_MESSAGE); //오류 메시지 띄우기
+
+        try {
+            playNextTrackAuto(playTriggeredByDoubleClick);
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(this,
+                    "다음 곡 재생 중 오류: " + e.getMessage(),
+                    "오류", JOptionPane.ERROR_MESSAGE);
+        } finally {
+            playTriggeredByDoubleClick = false;
         }
     }
 
-    // 재생-일시정지 버튼이 눌렸을 때 실행되는 메소드
-    @SuppressWarnings("removal")
-    private void togglePlayPause() throws FileNotFoundException {
-        if(!isPlaying) { //음악이 재생 중이 아닐 때
-            if(!fileList.isEmpty()) { //리스트에 파일이 있을 때
-                startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악을 재생
-                playPauseButton.setIcon(pauseIcon); //일시정지 버튼으로 변경
-            } else { //리스트에 파일이 없을 때
-                JOptionPane.showMessageDialog(null, "리스트에 파일이 존재하지 않습니다!",
-                        "오류", JOptionPane.ERROR_MESSAGE); //오류 메시지 띄우기
-            }
-        } else { //음악이 재생 중일 때
-            if (playPauseButton.getIcon() == pauseIcon) { //재생_일시정지 버튼의 아이콘이 일시정지 아이콘일 때
-                titleLabel.setText("음악 일시 정지됨"); //제목을 "일시 정지"로 변경
-                subTitleLabel.setText("재생 버튼을 누르면 다시 재생됩니다."); //부제목 변경
-                playPauseButton.setIcon(playIcon); //재생_일시정지 버튼의 아이콘을 재생 아이콘으로 변경
-                musicThread.suspend(); //음악 스레드를 일시정지한다. (지원 중단된 메소드)
-            } else if (playPauseButton.getIcon() == playIcon) { //재생_일시정지 버튼의 아이콘이 재생 아이콘일 때
-                titleLabel.setText("현재 재생 중인 파일은 " + currentFile.getName() + " 입니다."); //제목을 다시 되돌린다.
-                subTitleLabel.setText("음악 재생 중"); //부제목 변경
-                playPauseButton.setIcon(pauseIcon); //재생_일시정지 버튼의 아이콘을 일시정지 아이콘으로 변경
-                musicThread.resume(); //음악 스레드의 일시 정지를 푼다. (지원 중단된 메소드)
-            }
+    private void stopMusicInternal() {
+        stopRequested.set(true);
+        // ===== 기존 스레드 취소 =====
+        if (playbackJob != null) {
+            playbackJob.cancel(true);
+            playbackJob = null;
         }
+
+        // ===== 스트림 닫아서 재생 종료 =====
+        try {
+            if (currentStream != null) currentStream.close();
+        } catch (Exception ignored) {}
+
+        currentPlayer = null;
+        currentStream = null;
     }
+
+    private void shutdownPlayback() {
+        stopMusicInternal();
+        playbackExec.shutdownNow();
+    }
+
+    private void resetToIdle(String title, String subtitle) {
+        SwingUtilities.invokeLater(() -> {
+            titleLabel.setText(title);
+            subTitleLabel.setText(subtitle);
+            playPauseButton.setIcon(playIcon);
+        });
+        isPlaying = false;
+    }
+
+    // ===== Track Navigation =====
 
     // 이전 버튼이 눌렸을 때 실행되는 메소드
-    @SuppressWarnings({"removal"})
-    private void playPreviousTrack() throws FileNotFoundException {
-        if(!fileList.isEmpty()) { //리스트에 파일이 있을 때
-            index = (index - 1 + fileList.size()) % fileList.size(); //인덱스 감소 - 이전 트랙 음악 선택, 0일 때의 경우 생각
-            if(musicThread.isAlive()) { //뮤직 스레드가 살아 있다면
-                musicThread.stop();	//뮤직 스레드를 정지
-            }
-            startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악, 이전 트랙 재생
+    private void playPreviousTrack() {
+        if (fileList.isEmpty()) { //리스트에 파일이 없을 때
+            showNoFileError();
+            return;
         }
-        else { //리스트에 파일이 없을 때
-            JOptionPane.showMessageDialog(null, "리스트에 파일이 존재하지 않습니다!",
-                    "오류", JOptionPane.ERROR_MESSAGE); //오류 메시지 띄우기
+        index = (index - 1 + fileList.size()) % fileList.size(); //인덱스 감소 - 이전 트랙 음악 선택, 0일 때의 경우 생각
+        stopMusicInternal(); //내부 음악 중지
+        startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악, 이전 트랙 재생
+    }
+
+    private void playNextTrackManually() {
+        if (fileList.isEmpty()) {
+            showNoFileError();
+            return;
+        }
+        index++;
+        if (index >= fileList.size()) index = 0;
+
+        stopMusicInternal();
+        startMusic(fileList.get(index));
+    }
+
+    /**
+     * Auto-next logic based on repeat mode.
+     * @param triggeredByDoubleClick kept for compatibility with your original intent; now simplified.
+     */
+    private void playNextTrackAuto(boolean triggeredByDoubleClick) {
+        // NOTE: triggeredByDoubleClick no longer changes logic much; we keep behavior similar.
+        // You can remove this param entirely after confirming expected behavior.
+
+        if (mode == 0) { // no repeat
+            if (!triggeredByDoubleClick) index++;
+
+            if (index < fileList.size()) {
+                startMusic(fileList.get(index));
+            } else {
+                // reached end
+                index = 0;
+                resetToIdle("Seong Eun Song", "리스트에 있는 모든 음악 재생 끝");
+            }
+            return;
+        }
+
+        if (mode == 1) { // repeat one
+            startMusic(fileList.get(index));
+            return;
+        }
+
+        // mode == 2 repeat all
+        if (!triggeredByDoubleClick) index++;
+        if (index >= fileList.size()) index = 0;
+        startMusic(fileList.get(index));
+    }
+
+    private void cycleRepeatMode() {
+        mode++;
+        if(mode >= 3) { //모드가 3이 되면
+            mode = 0; //모드 0으로 다시 돌리기
+        }
+        switch(mode) { //모드
+            case 0 -> repeatButton.setText("반복 없음"); //무반복 모드
+            case 1 -> repeatButton.setText("한곡 반복"); //한번 반복 모드
+            case 2 -> repeatButton.setText("전체 반복"); //전체 반복 모드
         }
     }
+
+    // ===== UI Helpers =====
 
     private void showInfoDialog() {
         MII_Dialog dialog = new MII_Dialog("프로그램 정보", 250, 240);//다이얼로그 창 띄우기
@@ -302,8 +469,15 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
         return result == JOptionPane.YES_OPTION;
     }
 
+    private void showNoFileError() {
+        JOptionPane.showMessageDialog(this, "리스트에 파일이 존재하지 않습니다!",
+                "오류", JOptionPane.ERROR_MESSAGE);
+    }
+
+    // ===== File Open (kept: JavaFX FileChooser) =====
     private void openFiles() {
         DefaultListModel<String> model = (DefaultListModel<String>) playList.getModel();
+
         Platform.runLater(() -> {
             // 윈도우 파일 선택기 인스턴스 생성
             FileChooser fileChooser = new FileChooser();
@@ -317,137 +491,83 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
 
             // 다중 선택 기능
             List<File> selectedFiles = fileChooser.showOpenMultipleDialog(new Stage());
+            if(selectedFiles == null) return;
 
-            if(selectedFiles != null) {
+            // NOTE: This code is running on JavaFX Application Thread.
+            // We must update Swing UI on EDT.
+            SwingUtilities.invokeLater(() -> {
                 for (File file : selectedFiles) { //파일 배열의 길이 만큼 i를 증가
-                    if (!fileList.contains(file)) { //배열에 저장된 파일이 중복되지 않을 때
-                        if (file.getName().toLowerCase().endsWith("mp3")) {
-                            //확장자가 mp3일 때
+                    if (file == null) continue;
 
-                            fileList.add(file); // 파일 리스트에 음악 파일 추가
-                            model.addElement(file.getName()); // 재생 목록 UI에 음악 파일 추가
-                            if(!isPlaying) {
-                                subTitleLabel.setText("음악 파일을 재생하려면 재생 버튼을 누르세요.");
-                            }
-                        } else { //확장자가 mp3가 아닐 때
-                            JOptionPane.showMessageDialog(null, "파일 형식이 올바르지 않습니다.\n"
-                                            + "이 플레이어는 확장자가 mp3인 파일만 지원합니다.",
-                                    "경고", JOptionPane.WARNING_MESSAGE);
-                        }
-                    } else { //배열에 저장된 파일이 중복될 때
+                    if (fileList.contains(file)) { //배열에 저장된 파일이 중복될 때
                         JOptionPane.showMessageDialog(null, "이미 존재하는 파일입니다.",
                                 "알림", JOptionPane.INFORMATION_MESSAGE);
+                        continue;
+                    }
+
+                    if (!file.getName().toLowerCase().endsWith("mp3")) {//확장자가 mp3가 아닐 때
+                        JOptionPane.showMessageDialog(null, "파일 형식이 올바르지 않습니다.\n"
+                                        + "이 플레이어는 확장자가 mp3인 파일만 지원합니다.",
+                                "경고", JOptionPane.WARNING_MESSAGE);
+                        continue;
+                    }
+
+                    fileList.add(file); // 파일 리스트에 음악 파일 추가
+                    model.addElement(file.getName()); // 재생 목록 UI에 음악 파일 추가
+
+                    if (!isPlaying) {
+                        subTitleLabel.setText("음악 파일을 재생하려면 재생 버튼을 누르세요.");
                     }
                 }
-            }
+            });
         });
     }
 
-    public void startMusic(File file) throws FileNotFoundException {
-        try {
-            currentFile = file; //전역 변수에 매개 변수의 정보를 받는다.(일시 정지 후 다시 재생할 때 필요)
-            fileInputStream = new FileInputStream(currentFile); //파일 입력 스트림으로 받아오기
-            player = new Player(fileInputStream);
-
-            System.out.println(currentFile.length());
-
-            titleLabel.setText("현재 재생 중인 파일은 " + currentFile.getName() + " 입니다."); //재생 중의 음악의 제목을 표시
-            subTitleLabel.setText("음악 재생 중");
-
-            musicThread = new Thread(this); //뮤직 스레드 객체 생성(mp3)
-            musicThread.start(); //뮤직 스레드 시작
-            isPlaying = true; //파워를 켜짐 상태로 전환
-        } catch (FileNotFoundException e) {
-            throw new FileNotFoundException();
-        } catch (JavaLayerException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void playNextTrack() throws FileNotFoundException {
-        index++;
-        if(index >= fileList.size()) { //인덱스가 파일 리스트의 크기와 같아질 떄
-            index = 0; //인덱스를 0으로 정한다.
-        }
-        startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악을 재생
-    }
-
-    private void playNextTrack(boolean doubleClick) throws FileNotFoundException { //다음 트랙 재생 메소드 - 자동으로 다음곡 재생 또는 더블클릭 판정 시
-
-        if(mode == 0) { //반복하지 않는다.
-            if(!doubleClick) { //음악 리스트에 더블클릭되지 않았을 때
-                index++; //인덱스 증가
-            }
-
-            if(index < fileList.size()) { //인덱스가 파일 리스트의 크기보다 작을 때까지
-                isPlaying = true;
-                startMusic(fileList.get(index)); //파일 리스트의 인덱스 번째의 음악을 재생
-            }
-            else { //인덱스가 파일 리스트의 크기와 같아질 때 부터
-                index = 0; //인덱스를 0으로 정한다.
-                if(player.isComplete()) {
-                    titleLabel.setText("Seong Eun Song"); //제목을 "Seong Eun Song"으로 변경
-                    subTitleLabel.setText("리스트에 있는 모든 음악 재생 끝");
-                    if(playPauseButton.getIcon() == pauseIcon) { //재생_일시정지 버튼의 아이콘이 일시정지 아이콘이었다면
-                        playPauseButton.setIcon(playIcon); //아이콘을 재생 아이콘으로 변경
-                    }
-                    isPlaying = false; //파워 꺼짐
-                }
-            }
-        } else if (mode == 1) { //한번 반복한다.
-            isPlaying = true;
-            startMusic(fileList.get(index));
-        } else if (mode == 2) { //전체 반복한다.
-            if(!doubleClick) { //음악 리스트에 더블클릭되지 않았을 때
-                index++; //인덱스 증가
-            }
-            isPlaying = true;
-            if(index >= fileList.size()) {
-                index = 0;
-            }
-            startMusic(fileList.get(index));
-        }
-
-    }
-
+    // ===== Playlist delete =====
     private void deleteTrack(int[] selectedIndices) {
         DefaultListModel<String> model = (DefaultListModel<String>) playList.getModel();
 
         // 역순으로 삭제
         for(int j = selectedIndices.length - 1; j >= 0; j--) {
+            int removeIndex = selectedIndices[j];
+            if(removeIndex < 0 || removeIndex >= fileList.size()) {
+                continue;
+            }
             fileList.remove(selectedIndices[j]); //i 배열의 인덱스 j의 파일을 지운다. 없으면 파일은 남아있는데 이름만 지워지고 인덱스가 재설정이 안된다.
             model.remove(selectedIndices[j]); //재생 목록에서 파일 이름을 지운다. 없으면 이름이 안 지워진다.
+
+            // Adjust current index if needed
+            if (removeIndex <= index && index > 0) {
+                index--;
+            }
         }
 
         // 인덱스 보정
-        if(fileList.size() <= index) {
-            index = fileList.size() - 1;
-        }
+        if (fileList.isEmpty()) index = 0;
+        else if (index >= fileList.size()) index = fileList.size() - 1;
 
         //갱신
         playList.repaint();
     }
 
     @Override
-    @SuppressWarnings("removal")
     public void mouseClicked(MouseEvent e) {
         if(e.getClickCount() == 1) {
             index = playList.locationToIndex(e.getPoint());
-        } else if (playList == e.getComponent() && e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
-            index = playList.locationToIndex(e.getPoint());
-            if(index >= 0) {
-                if(musicThread != null && musicThread.isAlive()) {
-                    musicThread.stop();
-                }
-                try {
-                    isPlaying = true;
-                    doubleClicked = true;
-                    playPauseButton.setIcon(pauseIcon);
-                    playNextTrack(doubleClicked);
-                } catch (FileNotFoundException ex) {
-                    throw new RuntimeException(ex);
-                }
-                doubleClicked = false;
+            return;
+        }
+
+        // Double click to play
+        if (playList == e.getComponent() && e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
+            int clicked = playList.locationToIndex(e.getPoint());
+            if (clicked < 0) return;
+
+            index = clicked;
+
+            if(!fileList.isEmpty() && index >= 0 && index < fileList.size()) {
+                playTriggeredByDoubleClick = true;
+                stopMusicInternal();
+                startMusic(fileList.get(index));
             }
         }
     }
@@ -465,26 +585,7 @@ public class MP3_Player extends JFrame implements ActionListener, MouseListener,
     public void mouseExited(MouseEvent e) {}
 
     @Override
-    public void run() {
-        try {
-            player = new Player(fileInputStream); //플레이어 객체 생성, 파일 입력 스트림으로 받아온 mp3 파일이다.
-
-            boolean e = musicThread.isAlive(); //뮤직 스레드가 살아있는지 본다.
-            System.out.println(e);
-
-            while (!player.isComplete()) {
-                player.play();
-            }
-            playNextTrack(doubleClicked);
-        } catch (JavaLayerException | FileNotFoundException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @Override
-    public void keyTyped(KeyEvent e) {
-
-    }
+    public void keyTyped(KeyEvent e) {}
 
     @Override
     public void keyPressed(KeyEvent e) {
