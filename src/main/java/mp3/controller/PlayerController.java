@@ -3,7 +3,10 @@ package mp3.controller;
 import javafx.application.Platform;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import mp3.domain.PlaybackSession;
+import mp3.domain.PlayerState;
 import mp3.domain.Playlist;
+import mp3.domain.Track;
 import mp3.service.JLayerPlayBackEngine;
 import mp3.ui.MP3PlayerFrame;
 
@@ -17,6 +20,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
     private final MP3PlayerFrame view;
     private final Playlist playlist;
     private final JLayerPlayBackEngine engine;
+    private PlaybackSession session = PlaybackSession.stopped();
 
     public PlayerController(MP3PlayerFrame view, Playlist playlist, JLayerPlayBackEngine engine) {
         this.view = view;
@@ -99,6 +103,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
             SwingUtilities.invokeLater(() -> {
                 DefaultListModel<String> model = view.listModel();
                 for (File f : selected) { //선택된 파일 만큼
+
                     if (f == null) continue;
 
                     if (playlist.contains(f)) { //배열에 저장된 파일이 중복될 때
@@ -114,8 +119,9 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
                         continue;
                     }
 
-                    playlist.add(f); // 플레이 리스트에 음악 파일 추가
-                    model.addElement(f.getName()); // 재생 목록 UI에 음악 파일 추가
+                    Track track = Track.from(f);
+                    playlist.add(track); // 플레이 리스트에 음악 파일 추가
+                    model.addElement(track.displayName()); // 재생 목록 UI에 음악 파일 추가
 
                     if (!engine.isPlaying()) {
                         view.setSubTitleText("음악 파일을 재생하려면 재생 버튼을 누르세요.");
@@ -143,6 +149,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         }
         playlist.previous();
         engine.stop();
+        session = session.withState(PlayerState.STOPPED);
         startCurrent();
     }
 
@@ -153,21 +160,42 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         }
         playlist.nextManual();
         engine.stop();
+        session = session.withState(PlayerState.STOPPED);
         startCurrent();
     }
 
     // 재생-일시정지 버튼이 눌렸을 때 실행되는 메소드
     public void togglePlayPause() {
-        if (!engine.isPlaying()) {
-            playSelectedOrCurrent();
+        if (playlist.isEmpty()) {
+            view.showNoFileError();
             return;
         }
 
-        // Pause = safe stop
-        view.setTitleText("음악 일시 정지됨");
-        view.setSubTitleText("재생 버튼을 누르면 처음부터 재생됩니다.");
-        view.setPlayIcon();
-        engine.stop();
+        if (engine.isPlaying() && !engine.isPaused()) {
+            engine.pause();
+            session = session.withState(PlayerState.PAUSED);
+            renderSession();
+            view.setTitleText("음악 일시 정지됨");
+            view.setSubTitleText("재생 버튼을 누르면 이어서 재생됩니다.");
+            view.setPlayIcon();
+            return;
+        }
+
+        if (engine.isPlaying() && engine.isPaused()) {
+            engine.resume(
+                    () -> SwingUtilities.invokeLater(this::onTrackCompleted),
+                    ex -> SwingUtilities.invokeLater(() -> view.showError("재생 오류: " + ex.getMessage()))
+            );
+            Track track = playlist.currentOrNull();
+            if (track != null) {
+                view.setTitleText("현재 재생 중인 파일은 " + track.displayName() + " 입니다.");
+            }
+            view.setSubTitleText("음악 재생 중");
+            view.setPauseIcon();
+            return;
+        }
+
+        playSelectedOrCurrent();
     }
 
     // 정지 버튼이 눌렸을 때 실행되는 메소드
@@ -177,6 +205,8 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
             return;
         }
         engine.stop();
+        session = session.withState(PlayerState.STOPPED);
+        renderSession();
         view.setTitleText("Seong Eun Song"); //제목을 "Seong Eun Song"으로 변경
         view.setSubTitleText("음악 정지");
         view.setPlayIcon(); //아이콘을 재생 아이콘으로 변경
@@ -193,35 +223,42 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
     private void playSelected() {
         if (playlist.isEmpty()) return;
         engine.stop();
+        session = session.withState(PlayerState.STOPPED);
         startCurrent();
     }
 
     private void startCurrent() {
-        File file = playlist.currentOrNull();
-        if (file == null) {
+        Track track = playlist.currentOrNull();
+        if (track == null) {
             view.showNoFileError();
+            session = PlaybackSession.stopped();
             return;
         }
 
-        view.setTitleText("현재 재생 중인 파일은 " + file.getName() + " 입니다.");
-        view.setSubTitleText("음악 재생 중");
-        view.setPauseIcon();
+        session = new PlaybackSession(track, PlayerState.PLAYING);
+        renderSession();
 
         engine.play(
-                file,
+                track.file(),
                 () -> SwingUtilities.invokeLater(this::onTrackCompleted),
-                ex -> SwingUtilities.invokeLater(() -> view.showError("재생 오류: " + ex.getMessage()))
+                ex -> SwingUtilities.invokeLater(() -> {
+                    session = session.withState(PlayerState.ERROR);
+                    view.showError("재생 오류: " + ex.getMessage());
+                    renderSession();
+                })
         );
     }
 
     private void onTrackCompleted() {
         if (playlist.isEmpty()) {
+            session = PlaybackSession.stopped();
             resetToIdle("Seong Eun Song", "재생할 파일이 없습니다.");
             return;
         }
 
-        File next = playlist.nextAuto();
+        Track next = playlist.nextAuto();
         if (next == null) {
+            session = session.withState(PlayerState.STOPPED);
             resetToIdle("Seong Eun Song", "리스트에 있는 모든 음악 재생 끝");
             return;
         }
@@ -252,8 +289,43 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
     }
 
     private void resetToIdle(String title, String subtitle) {
+        session = session.withState(PlayerState.STOPPED);
         view.setTitleText(title);
         view.setSubTitleText(subtitle);
         view.setPlayIcon();
+    }
+
+    private void renderSession() {
+        if (session.isStopped()) {
+            view.setTitleText("Seong Eun Song");
+            view.setSubTitleText("음악 정지");
+            view.setPlayIcon();
+            return;
+        }
+
+        if (session.isPaused()) {
+            view.setTitleText("음악 일시 정지됨");
+            view.setSubTitleText("재생 버튼을 누르면 이어서 재생됩니다.");
+            view.setPlayIcon();
+            return;
+        }
+
+        if (session.isError()) {
+            view.setTitleText("오류 발생");
+            view.setSubTitleText("재생 중 문제가 발생했습니다.");
+            view.setPlayIcon();
+            return;
+        }
+
+        if (session.isPlaying()) {
+            Track track = session.currentTrack();
+            if (track != null) {
+                view.setTitleText("현재 재생 중인 파일은 " + track.displayName() + " 입니다.");
+            } else {
+                view.setTitleText("현재 재생 중");
+            }
+            view.setSubTitleText("음악 재생 중");
+            view.setPauseIcon();
+        }
     }
 }

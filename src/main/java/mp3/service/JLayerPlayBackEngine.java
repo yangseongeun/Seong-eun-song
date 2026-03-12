@@ -2,33 +2,37 @@ package mp3.service;
 
 import javazoom.jl.player.Player;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
 
 public class JLayerPlayBackEngine {
 
     private final ExecutorService playbackExec = newSingleThreadExecutor();
+    private final Object pauseLock = new Object();
+
     private Future<?> playbackJob;
 
     private volatile Player currentPlayer;
-    private volatile FileInputStream currentStream;
-
-    private final AtomicBoolean stopRequested = new AtomicBoolean(false);
-
-    // 완료 이벤트 꼬임 방지 토큰
-    private final AtomicLong playIdGen = new AtomicLong(0);
-    private volatile long activePlayId = 0;
+    private volatile FileInputStream currentFileStream;
+    private volatile BufferedInputStream currentBufferedStream;
+    private volatile File currentFile;
 
     private volatile boolean playing = false; //재생 중인지 아닌지 판단하는 변수
+    private volatile boolean paused = false; //일시정지 중인지 아닌지 판단하는 변수
+    private volatile boolean stopRequested = false;
 
     public boolean isPlaying() {
         return playing;
+    }
+
+    public boolean isPaused() {
+        return paused;
     }
 
     /*
@@ -37,40 +41,91 @@ public class JLayerPlayBackEngine {
      * (즉, UI 업데이트는 호출 측에서 SwingUtilities/Platform.runLater로 감싸야 함)
      */
 
-    public void play(File file, Runnable onCompleted, java.util.function.Consumer<Exception> onError) {
+    public void play(File file, Runnable onCompleted, Consumer<Exception> onError) {
         if (file == null) return;
 
-        stop(); // 기존 재생 안전 종료
-
-        final long playId = playIdGen.incrementAndGet();
-        activePlayId = playId;
+        stop();
+        currentFile = file;
+        stopRequested = false;
+        paused = false;
 
         playbackJob = playbackExec.submit(() -> {
-            stopRequested.set(false);
+            try (FileInputStream fis = new FileInputStream(file);
+                 BufferedInputStream bis = new BufferedInputStream(fis)) {
 
-            try (FileInputStream fis = new FileInputStream(file)) {
-                currentStream = fis;
-                currentPlayer = new Player(fis);
+                currentFileStream = fis;
+                currentBufferedStream = bis;
+                currentPlayer = new Player(bis);
+
                 playing = true;
 
-                // Blocking play (background thread)
-                currentPlayer.play();
+                // 1프레임씩 재생하면서 pause 제어
+                while (!stopRequested) {
+                    synchronized (pauseLock) {
+                        while (paused && !stopRequested) {
+                            pauseLock.wait();
+                        }
+                    }
 
-                // 완료 콜백(이전 작업이면 무시)
-                if (playId == activePlayId && !stopRequested.get() && !Thread.currentThread().isInterrupted()) {
-                    if (onCompleted != null) onCompleted.run();
+                    if (stopRequested) break;
+
+                    boolean hasMore = currentPlayer.play(1);
+                    if (!hasMore) {
+                        break; // EOF
+                    }
                 }
-            } catch (Exception ex) {
-                // stop/cancel로 인한 예외면 조용히 종료
-                if (stopRequested.get() || Thread.currentThread().isInterrupted()) return;
 
-                if (onError != null) onError.accept(ex);
+                if (!stopRequested && onCompleted != null) {
+                    onCompleted.run();
+                }
+
+            } catch (Exception ex) {
+                if (!stopRequested && onError != null) {
+                    onError.accept(ex);
+                }
             } finally {
                 playing = false;
-                currentPlayer = null;
-                currentStream = null;
+                paused = false;
+                closeResources();
             }
         });
+    }
+
+    public void pause() {
+        if (!playing) return;
+        paused = true;
+    }
+
+    public void resume(Runnable onCompleted, Consumer<Exception> onError) {
+        if (!playing) return;
+        if (!paused) return;
+
+        synchronized (pauseLock) {
+            paused = false;
+            pauseLock.notifyAll();
+        }
+    }
+
+    /** 안전 정지(협력적 취소) */
+    public void stop() {
+        stopRequested = true;
+        paused = false;
+
+        synchronized (pauseLock) {
+            pauseLock.notifyAll();
+        }
+
+        try {
+            if (currentPlayer != null) currentPlayer.close();
+        } catch (Exception ignored) {}
+
+        if (playbackJob != null) {
+            playbackJob.cancel(true);
+            playbackJob = null;
+        }
+
+        closeResources();
+        playing = false;
     }
 
     public void shutdown() {
@@ -78,25 +133,19 @@ public class JLayerPlayBackEngine {
         playbackExec.shutdownNow();
     }
 
-    /** 안전 정지(협력적 취소) */
-    public void stop() {
-        stopRequested.set(true);
-
-        // 기존 작업 무효화(완료 이벤트가 늦게 와도 무시)
-        activePlayId = playIdGen.incrementAndGet();
-        // ===== 기존 스레드 취소 =====
-        if (playbackJob != null) {
-            playbackJob.cancel(true);
-            playbackJob = null;
-        }
-
-        // ===== 스트림 닫아서 재생 종료 =====
+    private void closeResources() {
         try {
-            if (currentStream != null) currentStream.close();
+            if (currentPlayer != null) currentPlayer.close();
+        } catch (Exception ignored) {}
+        try {
+            if (currentBufferedStream != null) currentBufferedStream.close();
+        } catch (Exception ignored) {}
+        try {
+            if (currentFileStream != null) currentFileStream.close();
         } catch (Exception ignored) {}
 
         currentPlayer = null;
-        currentStream = null;
-        playing = false; //파워 꺼짐
+        currentBufferedStream = null;
+        currentFileStream = null;
     }
 }
