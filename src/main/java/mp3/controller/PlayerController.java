@@ -183,8 +183,6 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
 
         if (engine.isPlaying() && engine.isPaused()) {
             engine.resume(
-                    () -> SwingUtilities.invokeLater(this::onTrackCompleted),
-                    ex -> SwingUtilities.invokeLater(() -> view.showError("재생 오류: " + ex.getMessage()))
             );
             Track track = playlist.currentOrNull();
             if (track != null) {

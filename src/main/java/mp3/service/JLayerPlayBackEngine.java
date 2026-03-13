@@ -11,7 +11,7 @@ import java.util.function.Consumer;
 
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
 
-public class JLayerPlayBackEngine {
+public class JLayerPlayBackEngine implements PlaybackEngine {
 
     private final ExecutorService playbackExec = newSingleThreadExecutor();
     private final Object pauseLock = new Object();
@@ -35,6 +35,14 @@ public class JLayerPlayBackEngine {
         return paused;
     }
 
+    public File getCurrentFile() {
+        return currentFile;
+    }
+
+    public boolean isCurrentFile(File file) {
+        return file != null && file.equals(currentFile);
+    }
+
     /*
      * 비동기 재생 시작.
      * onCompleted / onError는 "호출 스레드가 무엇인지" 보장하지 않음.
@@ -45,6 +53,7 @@ public class JLayerPlayBackEngine {
         if (file == null) return;
 
         stop();
+
         currentFile = file;
         stopRequested = false;
         paused = false;
@@ -87,18 +96,18 @@ public class JLayerPlayBackEngine {
                 playing = false;
                 paused = false;
                 closeResources();
+                currentFile = null;
             }
         });
     }
 
     public void pause() {
-        if (!playing) return;
+        if (!playing || paused) return;
         paused = true;
     }
 
-    public void resume(Runnable onCompleted, Consumer<Exception> onError) {
-        if (!playing) return;
-        if (!paused) return;
+    public void resume() {
+        if (!playing || !paused) return;
 
         synchronized (pauseLock) {
             paused = false;
@@ -126,6 +135,8 @@ public class JLayerPlayBackEngine {
 
         closeResources();
         playing = false;
+        paused = false;
+        currentFile = null;
     }
 
     public void shutdown() {

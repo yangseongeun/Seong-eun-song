@@ -11,7 +11,6 @@ import java.awt.event.*;
  * - Removed Runnable + manual Thread control (stop/suspend/resume).
  * - Uses ExecutorService + Future cancellation + stream close (cooperative cancellation).
  * - UI updates are executed on Swing EDT.
- * - "Pause" is implemented as safe Stop (restart from beginning on next Play).
  */
 
 public class MP3PlayerFrame extends JFrame {
