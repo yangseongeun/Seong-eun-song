@@ -19,19 +19,25 @@ import java.util.List;
 
 public class PlayerController implements ActionListener, MouseListener, KeyListener {
 
+    // ===== UI =====
     private final MP3PlayerFrame playerFrame;
-    private final Playlist playlist;
-    private final MediaPlayBackEngine playBackEngine;
 
+    // ===== Domain =====
+    private final Playlist playlist;
     private PlaybackSession session = PlaybackSession.stopped();
 
-    // [추가] 진행 상황 UI 갱신용 타이머
-    private final Timer progressTimer;
+    // ===== Service =====
+    private final MediaPlayBackEngine playBackEngine;
 
-    // [추가] 사용자가 슬라이더를 직접 움직이는 중인지
-    private boolean userSeeking = false;
+    // ===== UI State =====
+    private final Timer progressTimer; // 진행 상황 UI 갱신용 타이머
+    private boolean userSeeking = false; //사용자가 슬라이더를 직접 움직이는 중인지
 
-    public PlayerController(MP3PlayerFrame playerFrame, Playlist playlist, MediaPlayBackEngine playBackEngine) {
+    public PlayerController(
+            MP3PlayerFrame playerFrame,
+            Playlist playlist,
+            MediaPlayBackEngine playBackEngine
+    ) {
         this.playerFrame = playerFrame;
         this.playlist = playlist;
         this.playBackEngine = playBackEngine;
@@ -43,8 +49,9 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         playerFrame.setVolumeValue(50);
     }
 
+    // ===== 추가 UI 바인딩 =====
     private void bindExtraUiEvents() {
-        // [추가] 진행 바 드래그 후 seek
+        // 진행 바 드래그 후 seek
         playerFrame.progressSlider().addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
@@ -66,7 +73,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
             }
         });
 
-        // [추가] 볼륨 조절
+        // 볼륨 조절
         playerFrame.volumeSlider().addChangeListener(new ChangeListener() {
             @Override
             public void stateChanged(ChangeEvent e) {
@@ -76,6 +83,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         });
     }
 
+    // ===== 이벤트 진입점(actionPerformed, keyPressed, mouseClicked) =====
     @Override
     public void actionPerformed(ActionEvent e) {
         String cmd = e.getActionCommand();
@@ -102,29 +110,51 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
 
     @Override
     public void mouseClicked(MouseEvent e) {
-        if (e.getComponent() instanceof JList && e.getClickCount() == 1) {
+        if (e.getComponent() instanceof JList<?> && e.getClickCount() == 1) {
             int clicked = playerFrame.listIndexAt(e.getPoint());
             playlist.setIndex(clicked);
             return;
         }
 
-        if (e.getComponent() instanceof JList
+        if (e.getComponent() instanceof JList<?>
                 && e.getClickCount() == 2
                 && e.getButton() == MouseEvent.BUTTON1) {
             int clicked = playerFrame.listIndexAt(e.getPoint());
-            if (clicked < 0) return;
+
+            if (clicked < 0) {
+                return;
+            }
+
             playlist.setIndex(clicked);
             playSelected();
         }
     }
 
-    @Override public void keyTyped(KeyEvent e) {}
-    @Override public void keyReleased(KeyEvent e) {}
-    @Override public void mousePressed(MouseEvent e) {}
-    @Override public void mouseReleased(MouseEvent e) {}
-    @Override public void mouseEntered(MouseEvent e) {}
-    @Override public void mouseExited(MouseEvent e) {}
+    @Override
+    public void keyTyped(KeyEvent e) {
+    }
 
+    @Override
+    public void keyReleased(KeyEvent e) {
+    }
+
+    @Override
+    public void mousePressed(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseReleased(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseEntered(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseExited(MouseEvent e) {
+    }
+
+    // ===== 메뉴 동작(openFiles, exitApp, showInfo) =====
     public void openFiles() {
         Platform.runLater(() -> {
             FileChooser chooser = new FileChooser();
@@ -184,6 +214,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         playerFrame.showInfoDialog();
     }
 
+    // ===== 플레이백 동작(prev, nextManual, togglePlayPause, stop) =====
     public void prev() {
         if (playlist.isEmpty()) {
             playerFrame.showNoFileError();
@@ -217,6 +248,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         if (playBackEngine.isPlaying() && !playBackEngine.isPaused()) {
             playBackEngine.pause();
             session = session.withState(PlayerState.PAUSED);
+
             renderSession();
             playerFrame.setTitleText("음악 일시 정지됨");
             playerFrame.setSubTitleText("재생 버튼을 누르면 이어서 재생됩니다.");
@@ -264,6 +296,12 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         resetProgressUi();
     }
 
+    public void cycleRepeat() {
+        playlist.cycleMode();
+        playerFrame.setRepeatText(playlist.modeLabel());
+    }
+
+    // ===== 내부 재생 도우미(playSelectedOrCurrent, playSelected, startCurrent, onTrackCompleted) =====
     private void playSelectedOrCurrent() {
         if (playlist.isEmpty()) {
             playerFrame.showNoFileError();
@@ -337,11 +375,7 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         startCurrent();
     }
 
-    public void cycleRepeat() {
-        playlist.cycleMode();
-        playerFrame.setRepeatText(playlist.modeLabel());
-    }
-
+    // ===== 재생목록 도우미(deleteSelected, resetToIdle, renderSession) =====
     private void deleteSelected() {
         int[] selected = playerFrame.selectedIndices();
         if (selected == null || selected.length == 0) return;
@@ -429,10 +463,11 @@ public class PlayerController implements ActionListener, MouseListener, KeyListe
         }
     }
 
-    // ===== [추가] 진행 바/시간 표시 =====
-
+    // ===== 진행 UI(refreshProgressUi, resetProgressUi, formatMillis) =====
     private void refreshProgressUi() {
-        if (userSeeking) return;
+        if (userSeeking) {
+            return;
+        }
 
         long current = playBackEngine.currentMillis();
         long total = playBackEngine.totalMillis();

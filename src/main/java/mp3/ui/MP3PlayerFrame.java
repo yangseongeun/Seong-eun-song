@@ -24,29 +24,24 @@ import java.awt.event.*;
 
 public class MP3PlayerFrame extends JFrame {
 
+    // ===== 메뉴(열기, 종료, 정보) =====
     private JMenuItem openMenuItem, exitMenuItem, infoMenuItem;
-    private JLabel titleLabel, subTitleLabel, playListLabel;
-    private JButton prevButton, playPauseButton, stopButton, nextButton, repeatButton; //5개의 버튼
+
+    // ===== 레이블 =====
+    private JLabel titleLabel, subTitleLabel, playListLabel; // 제목, 부제목, 재생 목록 레이블
+    private JLabel currentTimeLabel, totalTimeLabel, volumeLabel; // 재생 시간 및 볼륨 레이블
+
+    // ===== 5개의 버튼(이전, 재생/일시정지, 정지, 다음, 반복 모드 버튼) =====
+    private JButton prevButton, playPauseButton, stopButton, nextButton, repeatButton;
+
+    // ===== 재생 목록 =====
     private JList<String> playList;
 
-    // [추가]
+    // ===== 진행상황 / 볼륨 =====
     private JSlider progressSlider;
-    private JLabel currentTimeLabel;
-    private JLabel totalTimeLabel;
-
-    // [추가]
     private JSlider volumeSlider;
-    private JLabel volumeLabel;
 
-    private ImageIcon icon(String name) {
-        var url = getClass().getResource("/images/" + name);
-        if (url == null) {
-            throw new RuntimeException("이미지 파일을 찾을 수 없습니다: /images/" + name);
-        }
-        return new ImageIcon(url);
-    }
-
-    //5개의 버튼
+    // ===== 아이콘 =====
     private final ImageIcon prevIcon = icon("prev.png");
     private final ImageIcon playIcon = icon("play.png");
     private final ImageIcon pauseIcon = icon("pause.png");
@@ -67,7 +62,23 @@ public class MP3PlayerFrame extends JFrame {
         setupLayout();
     }
 
-    // UI 컴포넌트 초기화
+    // ===== 리소스 도우미(icon, createButton) =====
+    private ImageIcon icon(String name) { // 아이콘을 가져오기
+        var url = getClass().getResource("/images/" + name);
+        if (url == null) {
+            throw new RuntimeException("이미지 파일을 찾을 수 없습니다: /images/" + name);
+        }
+        return new ImageIcon(url);
+    }
+
+    private JButton createButton(ImageIcon icon, String tooltip, Font font) { // 버튼을 만드는 함수
+        JButton button = new JButton(icon);
+        button.setToolTipText(tooltip);
+        button.setFont(font);
+        return button;
+    }
+
+    // ===== UI 컴포넌트 초기화 =====
     private void initializeComponents() {
         Font Gullim = new Font("굴림", Font.PLAIN, 15);
         Font gungseo = new Font("궁서", Font.PLAIN, 20);
@@ -153,14 +164,6 @@ public class MP3PlayerFrame extends JFrame {
         volumeLabel = new JLabel("볼륨");
         volumeSlider = new JSlider(0, 100, 50);
         volumeSlider.setToolTipText("볼륨 조절");
-    }
-
-    //버튼을 만드는 함수
-    private JButton createButton(ImageIcon icon, String tooltip, Font font) {
-        JButton button = new JButton(icon);
-        button.setToolTipText(tooltip);
-        button.setFont(font);
-        return button;
     }
 
     // 레이아웃
